@@ -19,6 +19,18 @@ fi
 # Source JIRA utilities
 source "$SCRIPT_DIR/jira-utils.sh"
 
+# Function to extract JIRA key from URL or return as-is if already a key
+extract_jira_key() {
+	local input="$1"
+	# If input contains /browse/, extract the key after it
+	if [[ "$input" =~ /browse/([A-Z]+-[0-9]+) ]]; then
+		echo "${BASH_REMATCH[1]}"
+	else
+		# Return as-is (assume it's already a key)
+		echo "$input"
+	fi
+}
+
 # Default values from environment or hardcoded
 WORKSPACE_ROOT="${DEMO_WORKSPACE_ROOT:-}"
 JIRA_TICKET_ID=""
@@ -43,11 +55,11 @@ while [[ $# -gt 0 ]]; do
 		shift 2
 		;;
 	--jira-ticket-id)
-		JIRA_TICKET_ID="$2"
+		JIRA_TICKET_ID=$(extract_jira_key "$2")
 		shift 2
 		;;
 	--epic-id)
-		EPIC_ID="$2"
+		EPIC_ID=$(extract_jira_key "$2")
 		shift 2
 		;;
 	--story-branch)
@@ -108,17 +120,26 @@ if [ "$INTERACTIVE_MODE" = true ]; then
 
 	# Prompt for JIRA ticket ID
 	if [ -z "$JIRA_TICKET_ID" ]; then
-		read -p "Enter JIRA ticket ID (Story): " JIRA_TICKET_ID
+		read -p "Enter JIRA ticket ID or URL (Story): " JIRA_TICKET_ID
+		JIRA_TICKET_ID=$(extract_jira_key "$JIRA_TICKET_ID")
 	fi
 
 	# Prompt for Epic ID
 	if [ -z "$EPIC_ID" ]; then
-		read -p "Enter Epic ID: " EPIC_ID
+		read -p "Enter Epic ID or URL: " EPIC_ID
+		EPIC_ID=$(extract_jira_key "$EPIC_ID")
 	fi
 
 	# Prompt for story branch
 	if [ -z "$STORY_BRANCH" ]; then
-		read -p "Enter story branch name (with implementation): " STORY_BRANCH
+		# Suggest default branch name based on JIRA ticket ID
+		if [ -n "$JIRA_TICKET_ID" ]; then
+			DEFAULT_BRANCH="story/$JIRA_TICKET_ID"
+			read -p "Enter story branch name [default: $DEFAULT_BRANCH]: " input
+			STORY_BRANCH="${input:-$DEFAULT_BRANCH}"
+		else
+			read -p "Enter story branch name (with implementation): " STORY_BRANCH
+		fi
 	fi
 
 	# Prompt for existing application BRD
@@ -151,14 +172,21 @@ fi
 # Non-interactive mode: use environment variables if parameters not provided
 if [ "$INTERACTIVE_MODE" = false ]; then
 	WORKSPACE_ROOT="${WORKSPACE_ROOT:-${ENV_WORKSPACE_ROOT:-.}}"
-	JIRA_TICKET_ID="${JIRA_TICKET_ID:-${ENV_JIRA_TICKET_ID}}"
-	EPIC_ID="${EPIC_ID:-${ENV_EPIC_ID}}"
+	JIRA_TICKET_ID=$(extract_jira_key "${JIRA_TICKET_ID:-${ENV_JIRA_TICKET_ID}}")
+	EPIC_ID=$(extract_jira_key "${EPIC_ID:-${ENV_EPIC_ID}}")
 	STORY_BRANCH="${STORY_BRANCH:-${ENV_STORY_BRANCH}}"
 	EXISTING_APP_BRD="${EXISTING_APP_BRD:-${ENV_EXISTING_APP_BRD}}"
 	EXISTING_APP_ARCH="${EXISTING_APP_ARCH:-${ENV_EXISTING_APP_ARCH}}"
 	GIT_REPO="${GIT_REPO:-${ENV_GIT_REPO}}"
 	CONTEXT_DIRS="${CONTEXT_DIRS:-${ENV_CONTEXT_DIRS:-src,docs}}"
 	POLICY_FILE="${POLICY_FILE:-${ENV_POLICY_FILE:-$SCRIPT_DIR/policies/unit-tests.policy.md}}"
+fi
+
+# Auto-generate story branch name if not provided
+if [ -z "$STORY_BRANCH" ] && [ -n "$JIRA_TICKET_ID" ]; then
+	STORY_BRANCH="story/$JIRA_TICKET_ID"
+	echo "Auto-generated story branch name: $STORY_BRANCH"
+	echo ""
 fi
 
 # Validate required parameters
@@ -228,22 +256,70 @@ echo "      is already complete on branch: $STORY_BRANCH"
 echo "=========================================="
 echo ""
 
+# Clone Git repository if provided (to get latest code with implementation)
+if [ -n "$GIT_REPO" ]; then
+	# Extract repo name from URL (last part without .git)
+	REPO_NAME=$(basename "$GIT_REPO" .git)
+	REPO_DIR="$WORKSPACE_ROOT/$REPO_NAME"
+
+	# Delete existing repo directory if it exists
+	if [ -d "$REPO_DIR" ]; then
+		echo "Deleting existing repository directory: $REPO_DIR"
+		rm -rf "$REPO_DIR"
+	fi
+
+	# Clone fresh copy
+	echo "Cloning repository from $GIT_REPO to $REPO_DIR..."
+	git clone "$GIT_REPO" "$REPO_DIR"
+	echo "Repository cloned successfully."
+	echo ""
+
+	# Copy BRD files into cloned repository if they exist (for Auggie access)
+	PARENT_DIR=$(dirname "$REPO_DIR")
+	if [ -n "$EXISTING_APP_BRD" ] && [[ "$EXISTING_APP_BRD" != /* ]]; then
+		# Relative path - copy from parent directory
+		SRC_BRD="$PARENT_DIR/$EXISTING_APP_BRD"
+		if [ -f "$SRC_BRD" ]; then
+			echo "Copying BRD file to cloned repository..."
+			cp "$SRC_BRD" "$REPO_DIR/"
+		fi
+	fi
+
+	# Update workspace root to the cloned repository for git operations
+	WORKSPACE_ROOT="$REPO_DIR"
+fi
+
 # Navigate to workspace
 cd "$WORKSPACE_ROOT"
 
 # Check if we're in a git repository
 if [ ! -d ".git" ]; then
 	echo "Error: Not a git repository at $WORKSPACE_ROOT"
+	echo "Please provide a valid git repository via --git-repo or ensure workspace is a git repo"
 	exit 1
 fi
 
+# Fetch latest changes from remote
+echo "Fetching latest changes from remote..."
+git fetch origin
+
 # Checkout the story branch (assumes implementation is already done)
 echo "Checking out story branch: $STORY_BRANCH"
-git checkout "$STORY_BRANCH" || {
-	echo "Error: Failed to checkout branch $STORY_BRANCH"
-	echo "Please ensure the branch exists and contains the story implementation"
+if git show-ref --verify --quiet "refs/heads/$STORY_BRANCH"; then
+	# Branch exists locally, just checkout
+	git checkout "$STORY_BRANCH"
+elif git show-ref --verify --quiet "refs/remotes/origin/$STORY_BRANCH"; then
+	# Branch exists on remote, checkout and track
+	echo "Branch found on remote, creating local tracking branch..."
+	git checkout -b "$STORY_BRANCH" "origin/$STORY_BRANCH"
+else
+	echo "Error: Branch $STORY_BRANCH not found locally or on remote"
+	echo "Please ensure the implementation agent has created and pushed the branch"
+	echo ""
+	echo "Available branches:"
+	git branch -a | grep -E "(story/|main|develop)" || git branch -a
 	exit 1
-}
+fi
 
 # Pull latest changes
 echo "Pulling latest changes from remote..."
@@ -261,7 +337,7 @@ echo ""
 
 # Fetch JIRA ticket details
 echo "Fetching JIRA ticket details..."
-STORY_JSON=$(fetch_jira_issue "$JIRA_TICKET_ID")
+STORY_JSON=$(get_jira_issue "$JIRA_TICKET_ID")
 
 if [ -z "$STORY_JSON" ]; then
 	echo "Error: Failed to fetch JIRA ticket: $JIRA_TICKET_ID"
@@ -270,7 +346,7 @@ fi
 
 # Fetch Epic details
 echo "Fetching Epic details..."
-EPIC_JSON=$(fetch_jira_issue "$EPIC_ID")
+EPIC_JSON=$(get_jira_issue "$EPIC_ID")
 
 if [ -z "$EPIC_JSON" ]; then
 	echo "Error: Failed to fetch Epic: $EPIC_ID"

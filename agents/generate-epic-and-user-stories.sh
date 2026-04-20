@@ -145,21 +145,43 @@ if [ -z "$BRD_PATH" ]; then
 	exit 1
 fi
 
-# Validate BRD file exists
-if [ ! -f "$BRD_PATH" ]; then
-	echo "Error: New feature BRD file not found: $BRD_PATH"
+# Validate BRD file exists (check in workspace root before cloning)
+BRD_CHECK_PATH="$BRD_PATH"
+if [[ "$BRD_PATH" != /* ]]; then
+	# Relative path - check in workspace root
+	BRD_CHECK_PATH="$WORKSPACE_ROOT/$BRD_PATH"
+fi
+
+if [ ! -f "$BRD_CHECK_PATH" ]; then
+	echo "Error: New feature BRD file not found: $BRD_CHECK_PATH"
 	exit 1
 fi
 
-# Validate optional files if provided
-if [ -n "$EXISTING_APP_BRD" ] && [ ! -f "$EXISTING_APP_BRD" ]; then
-	echo "Error: Existing application BRD file not found: $EXISTING_APP_BRD"
-	exit 1
+# Validate optional files if provided (check in workspace root before cloning)
+if [ -n "$EXISTING_APP_BRD" ]; then
+	EXISTING_BRD_CHECK_PATH="$EXISTING_APP_BRD"
+	if [[ "$EXISTING_APP_BRD" != /* ]]; then
+		# Relative path - check in workspace root
+		EXISTING_BRD_CHECK_PATH="$WORKSPACE_ROOT/$EXISTING_APP_BRD"
+	fi
+
+	if [ ! -f "$EXISTING_BRD_CHECK_PATH" ]; then
+		echo "Error: Existing application BRD file not found: $EXISTING_BRD_CHECK_PATH"
+		exit 1
+	fi
 fi
 
-if [ -n "$EXISTING_APP_ARCH" ] && [ ! -f "$EXISTING_APP_ARCH" ]; then
-	echo "Error: Existing application architecture file not found: $EXISTING_APP_ARCH"
-	exit 1
+if [ -n "$EXISTING_APP_ARCH" ]; then
+	EXISTING_ARCH_CHECK_PATH="$EXISTING_APP_ARCH"
+	if [[ "$EXISTING_APP_ARCH" != /* ]]; then
+		# Relative path - check in workspace root
+		EXISTING_ARCH_CHECK_PATH="$WORKSPACE_ROOT/$EXISTING_APP_ARCH"
+	fi
+
+	if [ ! -f "$EXISTING_ARCH_CHECK_PATH" ]; then
+		echo "Error: Existing application architecture file not found: $EXISTING_ARCH_CHECK_PATH"
+		exit 1
+	fi
 fi
 
 # Clone Git repository if provided (always delete and re-clone for clean state)
@@ -179,6 +201,43 @@ if [ -n "$GIT_REPO" ]; then
 	git clone "$GIT_REPO" "$REPO_DIR"
 	echo "Repository cloned successfully."
 	echo ""
+
+	# Copy BRD files into cloned repository if they exist (for Auggie access)
+	PARENT_DIR=$(dirname "$REPO_DIR")
+
+	# Copy existing app BRD if provided and is relative path
+	if [ -n "$EXISTING_APP_BRD" ] && [[ "$EXISTING_APP_BRD" != /* ]]; then
+		SRC_BRD="$PARENT_DIR/$EXISTING_APP_BRD"
+		if [ -f "$SRC_BRD" ]; then
+			echo "Copying existing app BRD to cloned repository..."
+			cp "$SRC_BRD" "$REPO_DIR/"
+		fi
+	fi
+
+	# Copy existing app architecture if provided and is relative path
+	if [ -n "$EXISTING_APP_ARCH" ] && [[ "$EXISTING_APP_ARCH" != /* ]]; then
+		SRC_ARCH="$PARENT_DIR/$EXISTING_APP_ARCH"
+		if [ -f "$SRC_ARCH" ]; then
+			echo "Copying existing app architecture to cloned repository..."
+			cp "$SRC_ARCH" "$REPO_DIR/"
+		fi
+	fi
+
+	# Copy new feature BRD if it's a relative path
+	if [ -n "$BRD_PATH" ] && [[ "$BRD_PATH" != /* ]]; then
+		SRC_NEW_BRD="$PARENT_DIR/$BRD_PATH"
+		if [ -f "$SRC_NEW_BRD" ]; then
+			echo "Copying new feature BRD to cloned repository..."
+			cp "$SRC_NEW_BRD" "$REPO_DIR/"
+		elif [ -d "$PARENT_DIR/requirements" ]; then
+			# Copy entire requirements folder if it exists
+			echo "Copying requirements folder to cloned repository..."
+			cp -r "$PARENT_DIR/requirements" "$REPO_DIR/"
+		fi
+	fi
+
+	# Update workspace root to the cloned repository
+	WORKSPACE_ROOT="$REPO_DIR"
 fi
 
 # Create output directory for epic & stories artifacts (start fresh each run)
@@ -231,14 +290,34 @@ fi
 CONTEXT_INSTRUCTION="$CONTEXT_INSTRUCTION
 - Workspace Root: $WORKSPACE_ROOT
 - Context Directories: $CONTEXT_DIRS
-- Artifacts Directory: $EPIC_STORIES_DIR/
+- Output Directory: $EPIC_STORIES_DIR/
 
-IMPORTANT: Create the following files in JSON format:
-1. epic.json - Epic with title and description (ADF JSON object) fields
-2. stories.json - Array of stories with title, description (ADF JSON object), and priority fields
-3. summary.md - Human-readable summary
+CRITICAL REQUIREMENTS:
 
-NOTE: Descriptions should be in Atlassian Document Format (ADF).
+You MUST create EXACTLY 3 files in the output directory:
+
+1. epic.json - Single epic object with:
+   - title (string)
+   - description (ADF JSON object, NOT a string)
+
+2. stories.json - Array of story objects, each with:
+   - title (string)
+   - description (ADF JSON object, NOT a string)
+   - priority (one of: \"Highest\", \"High\", \"Medium\", \"Low\", \"Lowest\")
+
+3. summary.md - Human-readable markdown summary
+
+IMPORTANT NOTES:
+- All descriptions MUST be in Atlassian Document Format (ADF) as JSON objects
+- Do NOT use markdown strings for descriptions
+- Stories must be ordered by dependency (foundational first)
+- Follow the exact format specified in the policy above
+
+WORKFLOW:
+1. Use task management to create 3 tasks: Create epic.json, Create stories.json, Create summary.md
+2. Complete each task one by one
+3. Mark each task as COMPLETE after creating the file
+4. Do NOT stop until all 3 tasks are marked COMPLETE
 
 Begin analysis and generation now."
 

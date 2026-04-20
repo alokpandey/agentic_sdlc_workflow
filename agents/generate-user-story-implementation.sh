@@ -18,6 +18,18 @@ fi
 # Source JIRA utilities
 source "$SCRIPT_DIR/jira-utils.sh"
 
+# Function to extract JIRA key from URL or return as-is if already a key
+extract_jira_key() {
+	local input="$1"
+	# If input contains /browse/, extract the key after it
+	if [[ "$input" =~ /browse/([A-Z]+-[0-9]+) ]]; then
+		echo "${BASH_REMATCH[1]}"
+	else
+		# Return as-is (assume it's already a key)
+		echo "$input"
+	fi
+}
+
 # Default values from environment or hardcoded
 WORKSPACE_ROOT="${DEMO_WORKSPACE_ROOT:-}"
 JIRA_TICKET_ID=""
@@ -43,11 +55,11 @@ while [[ $# -gt 0 ]]; do
 		shift 2
 		;;
 	--jira-ticket-id)
-		JIRA_TICKET_ID="$2"
+		JIRA_TICKET_ID=$(extract_jira_key "$2")
 		shift 2
 		;;
 	--epic-id)
-		EPIC_ID="$2"
+		EPIC_ID=$(extract_jira_key "$2")
 		shift 2
 		;;
 	--existing-app-brd)
@@ -112,12 +124,14 @@ if [ "$INTERACTIVE_MODE" = true ]; then
 
 	# Prompt for JIRA ticket ID
 	if [ -z "$JIRA_TICKET_ID" ]; then
-		read -p "Enter JIRA ticket ID (Story): " JIRA_TICKET_ID
+		read -p "Enter JIRA ticket ID or URL (Story): " JIRA_TICKET_ID
+		JIRA_TICKET_ID=$(extract_jira_key "$JIRA_TICKET_ID")
 	fi
 
 	# Prompt for Epic ID
 	if [ -z "$EPIC_ID" ]; then
-		read -p "Enter Epic ID: " EPIC_ID
+		read -p "Enter Epic ID or URL: " EPIC_ID
+		EPIC_ID=$(extract_jira_key "$EPIC_ID")
 	fi
 
 	# Prompt for existing application BRD
@@ -159,8 +173,8 @@ fi
 # Non-interactive mode: use environment variables if parameters not provided
 if [ "$INTERACTIVE_MODE" = false ]; then
 	WORKSPACE_ROOT="${WORKSPACE_ROOT:-${ENV_WORKSPACE_ROOT:-.}}"
-	JIRA_TICKET_ID="${JIRA_TICKET_ID:-${ENV_JIRA_TICKET_ID}}"
-	EPIC_ID="${EPIC_ID:-${ENV_EPIC_ID}}"
+	JIRA_TICKET_ID=$(extract_jira_key "${JIRA_TICKET_ID:-${ENV_JIRA_TICKET_ID}}")
+	EPIC_ID=$(extract_jira_key "${EPIC_ID:-${ENV_EPIC_ID}}")
 	EXISTING_APP_BRD="${EXISTING_APP_BRD:-${ENV_EXISTING_APP_BRD}}"
 	EXISTING_APP_ARCH="${EXISTING_APP_ARCH:-${ENV_EXISTING_APP_ARCH}}"
 	NEW_BRD="${NEW_BRD:-${ENV_NEW_BRD}}"
@@ -249,6 +263,29 @@ if [ -n "$GIT_REPO" ]; then
 	git clone "$GIT_REPO" "$REPO_DIR"
 	echo "Repository cloned successfully."
 	echo ""
+
+	# Copy BRD files into cloned repository if they exist (for Auggie access)
+	PARENT_DIR=$(dirname "$REPO_DIR")
+	if [ -n "$EXISTING_APP_BRD" ] && [[ "$EXISTING_APP_BRD" != /* ]]; then
+		# Relative path - copy from parent directory
+		SRC_BRD="$PARENT_DIR/$EXISTING_APP_BRD"
+		if [ -f "$SRC_BRD" ]; then
+			echo "Copying BRD file to cloned repository..."
+			cp "$SRC_BRD" "$REPO_DIR/"
+		fi
+	fi
+	if [ -n "$NEW_BRD" ] && [[ "$NEW_BRD" != /* ]]; then
+		# Relative path - copy from parent directory
+		SRC_NEW_BRD="$PARENT_DIR/$NEW_BRD"
+		if [ -f "$SRC_NEW_BRD" ]; then
+			echo "Copying new BRD file to cloned repository..."
+			cp "$SRC_NEW_BRD" "$REPO_DIR/"
+		elif [ -d "$PARENT_DIR/requirements" ]; then
+			# Copy entire requirements folder
+			echo "Copying requirements folder to cloned repository..."
+			cp -r "$PARENT_DIR/requirements" "$REPO_DIR/"
+		fi
+	fi
 
 	# Update workspace root to the cloned repository for git operations
 	WORKSPACE_ROOT="$REPO_DIR"
